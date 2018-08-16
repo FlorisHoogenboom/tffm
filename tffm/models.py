@@ -1,9 +1,14 @@
 """Implementation of an arbitrary order Factorization Machines."""
 
 import numpy as np
-from .base import TFFMBaseModel
-from .utils import loss_logistic, loss_mse,  sigmoid
-
+from tqdm import tqdm
+import sklearn
+from .base import TFFMBaseModel, batch_to_feeddict, batcher
+from .utils import (
+    loss_logistic, loss_mse,
+    sigmoid, loss_ranknet,
+    ranknet_batcher
+)
 
 
 class TFFMClassifier(TFFMBaseModel):
@@ -140,4 +145,104 @@ class TFFMRegressor(TFFMBaseModel):
             Returns predicted values.
         """
         predictions = self.decision_function(X, pred_batch_size)
+        return predictions
+
+
+class TFFMRankNet(TFFMBaseModel):
+    """Factorization Machine (aka FM).
+
+    This class implements L2-regularized arbitrary order FM model with MSE
+    loss and gradient-based optimization.
+
+    Custom loss functions are not supported, mean squared error is always
+    used. Any loss function provided in parameters will be overwritten.
+
+    See TFFMBaseModel and TFFMCore docs for details about parameters.
+    """
+
+    def __init__(self, **init_params):
+
+        assert 'loss_function' not in init_params, """Parameter 'loss_function' is
+            not supported for TFFMRankNet. For custom loss function, extend the
+            base class TFFMBaseModel."""
+
+        assert 'batch_size' not in init_params, """Parameter 'batch_size' is
+            not supported for TFFMRankNet. Batches are automatically determined
+            based on the group size."""
+
+        init_params['loss_function'] = loss_ranknet
+        self.init_basemodel(**init_params)
+
+    def _fit(self, X_, y_, w_, n_epochs=None, show_progress=False):
+        if self.core.n_features is None:
+            # The first column represents the groups so this
+            # should not be taken into account for the num
+            # features
+            self.core.set_num_features(X_.shape[1] - 1)
+
+        assert self.core.n_features==X_.shape[1] - 1, 'Different num of features in initialized graph and input'
+
+        if self.core.graph is None:
+            self.core.build_graph()
+            self.initialize_session()
+
+        if n_epochs is None:
+            n_epochs = self.n_epochs
+
+        # For reproducible results
+        if self.seed:
+            np.random.seed(self.seed)
+
+        # Training cycle
+        for epoch in tqdm(range(n_epochs), unit='epoch', disable=(not show_progress)):
+            epoch_loss = []
+            # iterate over batches
+            for bX, bY, bW in ranknet_batcher(X_, y_=y_, w_=w_):
+                fd = batch_to_feeddict(bX, bY, bW, core=self.core)
+                ops_to_run = [self.core.trainer, self.core.target, self.core.summary_op]
+                result = self.session.run(ops_to_run, feed_dict=fd)
+                _, batch_target_value, summary_str = result
+                epoch_loss.append(batch_target_value)
+                # write stats
+                if self.need_logs:
+                    self.summary_writer.add_summary(summary_str, self.steps)
+                    self.summary_writer.flush()
+                self.steps += 1
+            if self.verbose > 1:
+                print('[epoch {}]: mean target value: {}'.format(epoch, np.mean(epoch_loss)))
+
+    def decision_function(self, X, batch_size=-1):
+        if self.core.graph is None:
+            raise sklearn.exceptions.NotFittedError("Call fit before prediction")
+        output = []
+
+        # The first row is onlyl usefull for fitting
+        X_feat = X[:,1:]
+        for bX, bY, bW in batcher(X_feat, y_=None, w_=None, batch_size=batch_size):
+            fd = batch_to_feeddict(bX, bY, bW, core=self.core)
+            output.append(self.session.run(self.core.outputs, feed_dict=fd))
+        distances = np.concatenate(output).reshape(-1)
+        # WARNING: be careful with this reshape in case of multiclass
+        return distances
+
+    def fit(self, X, y, sample_weight=None, n_epochs=None, show_progress=False):
+        sample_weight = np.ones_like(y) if sample_weight is None else sample_weight
+        self._fit(X_=X, y_=y, w_=sample_weight, n_epochs=n_epochs, show_progress=show_progress)
+        return self
+
+    def predict(self, X, pred_batch_size=-1):
+        """Predict using the FM model
+
+        Parameters
+        ----------
+        X : {numpy.array, scipy.sparse.csr_matrix}, shape = (n_samples, n_features)
+            Samples.
+        pred_batch_size : int batch size for prediction (default None)
+
+        Returns
+        -------
+        predictions : array, shape = (n_samples,)
+            Returns predicted values.
+        """
+        predictions = self.decision_function(X, batch_size=pred_batch_size)
         return predictions

@@ -1,3 +1,3 @@
-from .models import TFFMClassifier, TFFMRegressor
+from .models import TFFMClassifier, TFFMRegressor, TFFMRankNet
 
-__all__ = ['TFFMClassifier', 'TFFMRegressor']
+__all__ = ['TFFMClassifier', 'TFFMRegressor', 'TFFMRankNet']

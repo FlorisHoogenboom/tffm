@@ -4,6 +4,7 @@ import math
 import numpy as np
 import tensorflow as tf
 import itertools
+from scipy import sparse
 from itertools import combinations_with_replacement, takewhile, count
 from collections import defaultdict
 
@@ -204,7 +205,89 @@ def loss_logistic(outputs, y):
     raw_loss = tf.log(tf.add(1.0, tf.exp(margins)))
     return tf.minimum(raw_loss, 100, name='truncated_log_loss')
 
+
 def loss_mse(outputs, y):
     return tf.pow(y -  tf.transpose(outputs), 2, name='mse_loss')
+
+
+def loss_ranknet(outputs, y):
+    y_true = tf.cast(y, tf.int32)
+
+    # Sigma is a shape parameter for the sigmoid function
+    sigma = tf.constant(1.0, dtype='float32')
+
+    S = tf.sign((tf.expand_dims(y_true, 0) - tf.expand_dims(y_true, -1))) + tf.constant(1)
+    s_diff = tf.expand_dims(outputs, 0) - tf.expand_dims(outputs, -1)
+
+    parts = tf.dynamic_partition(s_diff, S, 3)
+
+    # Loss function for records that can be compared
+    loss_neg = tf.reduce_mean(
+        tf.log(tf.constant(1.0) + tf.exp(sigma * parts[0]))
+    )
+    loss_pos = tf.reduce_mean(
+        tf.log(tf.constant(1.0) + tf.exp(tf.constant(-1.0) * sigma * parts[2]))
+    )
+
+    # Loss functions for ties. We use the fact that the linear term
+    # cancels out over all pairs.
+    loss_tie = tf.reduce_mean(
+        tf.constant(0.5) * sigma * parts[1] +
+        tf.log(tf.constant(1.0) + tf.exp(tf.constant(-1.0) * sigma * parts[1]))
+    )
+
+    return loss_neg + loss_pos
+
+
+def ranknet_batcher(X_, y_=None, w_=None):
+    """Split data into batches. Each batch corresponds to a single
+    query.
+
+    Parameters
+    ----------
+    X_ : {numpy.array, scipy.sparse.csr_matrix}, shape (n_samples, n_features + 1)
+        Training vector, where n_samples in the number of samples and
+        n_features is the number of features. The first column should contain
+        the group indicators.
+
+    y_ : np.array or None, shape (n_samples,)
+        Target vector relative to X.
+
+    w_ : np.array or None, shape (n_samples,)
+        Vector of sample weights.
+
+    Yields
+    -------
+    ret_x : {numpy.array, scipy.sparse.csr_matrix}, shape (?, n_features)
+        Same type as input with the group indicators removed.
+
+    ret_y : np.array or None, shape (?,)
+
+    ret_w : np.array or None, shape (?,)
+    """
+    if sparse.issparse(X_):
+        groups = X_[:,0].toarray()[:,0]
+    else:
+        groups = X_[:,0]
+
+    X_feat = X_[:, 1:]
+
+    X_blocks = [X_feat[groups == k] for k in np.unique(groups)]
+
+    if y_ is not None:
+        y_blocks = [y_[groups == k] for k in np.unique(groups)]
+
+    if w_ is not None:
+        w_blocks = [w_[groups == k] for k in np.unique(groups)]
+
+    for i in np.random.permutation(len(X_blocks)):
+        ret_x = X_blocks[i]
+        ret_y = None
+        ret_w = None
+        if y_ is not None:
+            ret_y = y_blocks[i]
+        if w_ is not None:
+            ret_w = w_blocks[i]
+        yield (ret_x, ret_y, ret_w)
     
 
